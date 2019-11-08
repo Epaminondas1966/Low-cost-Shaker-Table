@@ -1,0 +1,391 @@
+//controle da mesa de vibração R5.1
+//autor: Epaminondas Antonine 19/08/2019
+//atualizado em 14/09/2019
+// Single Axis 4A TB6600 Stepper Motor Driver Controller
+// use Serial Monitor to control 115200 baud
+//23/10/2019 aumentado a quantidade do passo do laço FOR para 50 ciclos
+
+/*Faça as ligações adequadas do display 128x64 para o Arduino:
+  GND --> GND
+  VCC -->5V
+  V0  --> Pino central de um potenciometro de 10k para ajuste de contraste (os outros dois pinos devem ser ligados em 5V e GND)
+  RS  --> D2
+  R/W --> D3
+  En   -->D4
+  PSB --> GND
+  RST --> D5
+  BLA --> 3,3V
+  BLK --> GND
+  este tipo de conexão com o display é serial SPI */
+
+#include <U8glib.h>
+#include <Wire.h>
+#define key1 10 //connect wire 1 to pin 10
+#define key2 11 //connect wire 2 to pin 11
+#define key3 A2 //connect wire 3 to pin A2
+#define key4 12 //connect wire 4 to pin 12
+
+# define X_EN  13  //ENA+ stepper motor enable , active High  
+# define X_DIR 7  //DIR+ axis stepper motor direction control  
+# define X_STP 6  //PUL+ axis stepper motor step control      
+# define FC_AV 8  //fim de curso afrente
+# define FC_AT 9 //fim de curso atras   
+
+int key1S = 0;
+int key2S = 0;
+int key3S = 0;
+int key4S = 0;
+int Tecla;
+
+int  X;
+int  X1;
+int NX;
+int RX;
+int c;
+double Ampl;
+double Freq;
+double FreqReal;
+double angRad;
+/* 500us + 500 us = 1000us em 1 seg = 1000 pulsos
+  200pulsos=8mm--> 1000pulsos= 40mm
+  velocidade maxima 40mm/s
+*/
+double Vmax = 0.0;
+const double Rel = 25.0;// multpl.-> mm p/ pulsos e divid -> Pulsos p/ mm (200 pulso=8mm)
+unsigned int passo = 0;
+double veloc = 0;
+double veloc1 = 0;
+double veloc2 = 0;
+double veloc3 = 0;
+const int ZeroSpeed = 800; //step in Microseconds
+const int ZeroSpeed1 = 800; //step in Microseconds
+const int CentroSpeed = 800; //step in Microseconds
+const float pi = 3.14159265;
+double Coseno;
+const int Ajuste = 400;
+
+int            FC_afrente ;//fim de curso de segurança
+int            FC_atras ;//fim de curso de segurança
+boolean        HomePos = false; // indica que foi feito o Home position
+boolean        InCenter = false;// indica que esta no centro
+boolean        Oscilar = false;// indica que queremos a vibração
+boolean        Stop = false;// parada da vibração
+
+float StartTime ;
+float CurrentTime;
+float ElapsedTime;
+
+
+U8GLIB_ST7920_128X64_1X  u8g(4, 3, 2, 5); //Enable, RW, RS, RESET
+
+void Zero() { // **************************************************************   Zero pos
+  FC_atras = digitalRead(FC_AT);
+  Tecla = 0;
+  digitalWrite (X_EN, LOW);//ENA+(+5V) Low=enabled
+   HomePos = false;
+
+  if (FC_atras == LOW)// low significa que não esta acionado
+  {
+    digitalWrite (X_DIR, LOW); // move até encobrir o FC
+    while (FC_atras == LOW) {
+      FC_atras = digitalRead(FC_AT);
+      digitalWrite (X_STP, LOW);
+      delayMicroseconds (ZeroSpeed);
+      digitalWrite (X_STP, HIGH);
+      delayMicroseconds (ZeroSpeed);
+
+    }
+  }
+
+
+  if (FC_atras == HIGH)// // high significa que esta acionado
+  {
+    digitalWrite (X_DIR, HIGH); // move até descobrir o FC
+    while (FC_atras == HIGH) {
+      FC_atras = digitalRead(FC_AT);
+      digitalWrite (X_STP, LOW);
+      delayMicroseconds (ZeroSpeed1);
+      digitalWrite (X_STP, HIGH);
+      delayMicroseconds (ZeroSpeed1);
+    }
+    digitalWrite (X_EN, HIGH);//ENA+(+5V) Low=enabled
+    X = 0;
+    RX = X;// posição real em 0 mm
+    HomePos = true;
+    
+  }
+}
+void Centro() { // *********************************************************** Centro pos.
+  int xt;
+  Tecla = 0;
+  InCenter = false;
+  X = RX; // transfiro a posição real em mm
+  X = X * Rel; // converte posição em step pulse
+  if (HomePos == true) {
+    digitalWrite (X_EN, LOW);//ENA+(+5V) Low=enabled
+    NX = (170 * Rel); // transforma a posição 160mm (fixa) em step pulses
+
+    if (NX > X)
+    {
+      digitalWrite (X_DIR, HIGH);  // vai p/ frente
+      xt = 1;
+    }
+    else
+    {
+      digitalWrite (X_DIR, LOW);  // recua
+      xt = -1;
+    }
+
+    for (; X != NX; X = X + xt) // tanto faz se X for > ou <
+    {
+      digitalWrite (X_STP, LOW);
+      delayMicroseconds (CentroSpeed);
+      digitalWrite (X_STP, HIGH);
+      delayMicroseconds (CentroSpeed);
+     
+    }
+
+    InCenter = true; RX = X / Rel; // transforma os pulsos em posição mm
+    digitalWrite (X_EN, HIGH);//ENA+(+5V) Low=enabled
+    
+  }
+  else {
+    InCenter = false;
+    
+  }
+
+}
+
+void Senoide() {// ******************************* executa 50 ciclos criando uma senoide
+    StartTime = millis();// guarda o inicio do ciclo
+    digitalWrite (X_EN, LOW);//Enable ativa com zero
+    digitalWrite (X_DIR, HIGH); // motor p/ frente
+    delayMicroseconds (10);
+    InCenter = false;
+    
+    for (c=0; c < 50; c++){
+       
+    //*******************************  1/4 da senoide
+    X = 0;
+    do { 
+      FC_atras = digitalRead(FC_AT);
+      FC_afrente = digitalRead(FC_AV);
+      key4S=digitalRead(key4);
+      if((FC_atras == HIGH || FC_afrente == HIGH )|| !key4S) {digitalWrite (X_EN, HIGH);Stop= true; break;}
+      Coseno = cos(X * angRad);
+      veloc2 = veloc1 * Coseno;
+      if (veloc2 < Ajuste){veloc2 = Ajuste;}
+      veloc = (1/veloc2) * 1000000;
+      digitalWrite (X_STP, LOW);
+      delayMicroseconds (veloc / 2);
+      digitalWrite (X_STP, HIGH);
+      delayMicroseconds (veloc / 2);
+      X = X + 1;
+       }
+     while (X < (passo));
+   
+  digitalWrite (X_DIR, LOW); // motor para atras
+  delayMicroseconds (10);
+  //********************************  2/4 da senoide
+  do {
+      FC_atras = digitalRead(FC_AT);
+      FC_afrente = digitalRead(FC_AV);
+      key4S=digitalRead(key4);
+      if((FC_atras == HIGH || FC_afrente == HIGH) || !key4S) {digitalWrite (X_EN, HIGH);Stop= true; break;}
+      Coseno = cos(X * angRad);
+      veloc2 = veloc1 * Coseno;
+      if (veloc2 < Ajuste){veloc2 = Ajuste;}
+      veloc = (1/veloc2) * 1000000;
+      digitalWrite (X_STP, LOW);
+      delayMicroseconds (veloc / 2);
+      digitalWrite (X_STP, HIGH);
+      delayMicroseconds (veloc / 2);
+      X = X-1;
+    }
+    while (X != 0);
+    
+    X = 0;
+    //********************************  3/4 da senoide
+    do {
+      FC_atras = digitalRead(FC_AT);
+      FC_afrente = digitalRead(FC_AV);
+      key4S=digitalRead(key4);
+      if((FC_atras == HIGH || FC_afrente == HIGH) || !key4S) {digitalWrite (X_EN, HIGH);Stop= true; break;}
+      Coseno = cos(X * angRad);
+      veloc2 = veloc1 * Coseno;
+      if (veloc2 < Ajuste){veloc2 = Ajuste;}
+      veloc = (1/veloc2) * 1000000;
+      digitalWrite (X_STP, LOW);
+      delayMicroseconds (veloc / 2);
+      digitalWrite (X_STP, HIGH);
+      delayMicroseconds (veloc / 2);
+      X = X + 1;
+      }
+    while (X < (passo));
+    //********************************  4/4 da senoide
+    digitalWrite (X_DIR, HIGH); // motor para frente
+    delayMicroseconds (10);
+    do {
+      FC_atras = digitalRead(FC_AT);
+      FC_afrente = digitalRead(FC_AV);
+      key4S=digitalRead(key4);
+      if((FC_atras == HIGH || FC_afrente == HIGH) || !key4S) {digitalWrite (X_EN, HIGH);Stop= true; break;}
+      Coseno = cos(X * angRad);
+      veloc2 = veloc1 * Coseno;
+      if (veloc2 < Ajuste){veloc2 = Ajuste;}
+      veloc = (1/veloc2) * 1000000;
+      digitalWrite (X_STP, LOW);
+      delayMicroseconds (veloc / 2);
+      digitalWrite (X_STP, HIGH);
+      delayMicroseconds (veloc / 2);
+      X = X-1;
+       }
+     while (X != 0);
+     
+     }
+     CalcFreq: 
+     Oscilar =false; InCenter=false;
+     CurrentTime = millis();
+     ElapsedTime = CurrentTime - StartTime;// calcula quanto tempo ficou executando
+     FreqReal= 1/(ElapsedTime/50000); // converte o delta tempo de 50 ciclos em frequencia
+     delay (1000);
+     Centro();
+  }
+  
+void draw(void) {
+  // graphic commands to redraw the complete screen should be placed here
+  u8g.setFont(u8g_font_6x10r);
+
+  u8g.drawStr( 0, 7, "1 Zero");
+  u8g.drawStr( 60, 7, "2 Centro");
+  u8g.drawStr( 0, 15, "3 Senoide");
+  u8g.drawStr( 60, 15, "4 Stop");
+  u8g.drawStr(0, 20,"---------------------");  
+  u8g.drawStr( 0, 26, "Ampl=+/- ");
+  u8g.setPrintPos(60, 26);  u8g.print(Ampl, 1);
+  u8g.setPrintPos(100, 26);  u8g.print("mm");
+  u8g.drawStr( 0, 35, "Freq= ");
+  u8g.setPrintPos(60, 35);  u8g.print(Freq, 2);
+  u8g.setPrintPos(100, 35);  u8g.print("Hz");
+  u8g.drawStr( 0, 44, "Steps= "); 
+  u8g.setPrintPos(60, 44);  u8g.print(passo); 
+  u8g.drawStr(0, 50,"---------------------"); 
+  u8g.drawStr( 0, 55, "Posicao= ");
+  u8g.setPrintPos(60, 55);  u8g.print(RX);
+  u8g.setPrintPos(100, 55); u8g.print("mm");
+  u8g.drawStr( 0, 63, "Fr Real= ");
+  u8g.setPrintPos(60, 63);  u8g.print(FreqReal,2);
+  u8g.setPrintPos(100, 63);  u8g.print("Hz");
+
+}
+
+void Teclado ()
+{
+  key1S = digitalRead(key1);// read if key1 is pressed
+  key2S = digitalRead(key2);// read if key1 is pressed
+  key3S = digitalRead(key3);// read if key1 is pressed
+  key4S = digitalRead(key4);// read if key1 is pressed
+
+  if (!key1S) {
+    Tecla = 1;
+    return ;
+  }
+  if (!key2S) {
+    Tecla = 2;
+    return ;
+  }
+  if (!key3S) {
+    Tecla = 3;
+    return ;
+  }
+  if (!key4S) {
+    Tecla = 4;
+    return ;
+  }
+}
+
+void setup(void) {
+  Serial.begin(115200);
+
+  pinMode (X_EN , OUTPUT); //ENA+(+5V)
+  pinMode (X_DIR, OUTPUT); //DIR+(+5v)
+  pinMode (X_STP, OUTPUT); //PUL+(+5v)
+
+  pinMode(FC_AV, INPUT_PULLUP);
+  pinMode(FC_AT, INPUT_PULLUP);
+
+  digitalWrite (X_EN, LOW); //ENA+(+5V) High=Enable
+  digitalWrite (X_DIR, LOW); //DIR+(+5v)
+  digitalWrite (X_STP, LOW); //PUL+(+5v)
+
+  u8g.setColorIndex(1);         // pixel on
+  pinMode(key1, INPUT_PULLUP);// set pin as input
+  pinMode(key2, INPUT_PULLUP);// set pin as input
+  pinMode(key3, INPUT_PULLUP);// set pin as input
+  pinMode(key4, INPUT_PULLUP);// set pin as input
+
+
+}
+
+void loop(void) {
+
+
+  Calcula ();
+  KeyB ();
+  atualDisp ();
+
+
+}
+
+
+void Calcula ()
+{
+  int Ampl1 = analogRead(A1);
+  double Freq1 = (analogRead(A0) * 0.01564); // frequencia max 16 Hz
+  Freq = constrain (Freq1, 0.5, 16.0);
+  double d = 210.96*pow(Freq, -1.021);// limita a amplitude em função da freq.
+  Ampl1 = map(Ampl1,0,1023,12,d); // limita a amplitude em função da freq.
+  double halfTime = 1 / (4 * Freq); // pega 1/4 do tempo do ciclo
+  passo = Ampl1;
+  angRad = pi / (2 * passo); // pi/2 = 90° (1/4 da senoide)
+  Ampl = passo/Rel;
+  veloc1 = 2000;// max obtido de modo experimental
+ 
+}
+
+void KeyB ()
+{
+  if (Tecla == 1) {
+    Zero();
+  }
+  if (Tecla == 2) {
+    Centro();
+  }
+  if (Tecla == 3) {
+    Oscilar = true;
+    Tecla = 0;
+  }
+  if (Tecla == 4) {
+    Stop = true;
+    Tecla = 0;
+  }
+  Teclado ();
+
+  if (Stop == true) {
+    Stop = false; Oscilar = false;
+    digitalWrite (X_STP, LOW); digitalWrite (X_EN, HIGH); //ENA+(+5V) Low=enabled
+  }
+  if (InCenter == true && Oscilar == true) {Senoide();}
+  
+}
+
+void atualDisp ()
+{
+
+  u8g.firstPage();
+  do {
+    draw();
+  } while ( u8g.nextPage() );
+
+}
+[/code]
